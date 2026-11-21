@@ -1,0 +1,370 @@
+---
+title: "Problem Set 4"
+author: "Ludovico Sinigaglia"
+date: today
+format:
+  html:
+    toc: true
+    embed-resources: true
+execute:
+  warning: false
+  message: false
+---
+
+**GitHub repo:** Add your repository link here.
+
+## ARIMA vs. ETS
+
+### 2.1 - The Data
+
+```{r}
+library(tidyverse)
+library(fpp3)
+
+liquor_raw <- read_csv(
+  "data/MRTSSM4453USN.csv",
+  na = ".",
+  col_types = cols(
+    observation_date = col_date(format = "%Y-%m-%d"),
+    MRTSSM4453USN = col_double()
+  )
+)
+
+liquor <- liquor_raw |>
+  transmute(
+    Month = yearmonth(observation_date),
+    sales = MRTSSM4453USN
+  ) |>
+  as_tsibble(index = Month) |>
+  filter(Month <= yearmonth("2019 Dec"))
+
+has_gaps(liquor)
+```
+
+### 2.1b - Sales and Seasonal Patterns
+
+```{r}
+liquor |>
+  autoplot(sales) +
+  labs(
+    title = "Monthly Liquor Store Sales",
+    x = "Year",
+    y = "Sales (Millions of Dollars)"
+  ) +
+  theme_minimal()
+```
+
+```{r}
+liquor |>
+  gg_season(log(sales)) +
+  labs(
+    title = "Seasonal Pattern of Liquor Store Sales",
+    x = "Month",
+    y = "Log of Sales"
+  ) +
+  theme_minimal()
+```
+
+Looking at the first graph, liquor store sales have generally increased over time, especially in the later years. There is also a clear seasonal pattern. December has the highest sales, probably because of the holidays, while February tends to have the lowest sales.
+
+The seasonal changes also seem to get bigger as overall sales increase. This suggests that the seasonal pattern depends on the level of sales. Using logs makes sense because it helps make these fluctuations more stable over time.
+
+### 2.2a - ARIMA and ETS Models
+
+```{r}
+liquor_fit <- liquor |>
+  model(
+    arima = ARIMA(log(sales)),
+    ets = ETS(log(sales))
+  )
+
+liquor_fit |>
+  select(arima) |>
+  report()
+
+liquor_fit |>
+  select(ets) |>
+  report()
+```
+
+The ARIMA model selected was ARIMA(1,0,2)(2,1,1)\[12\] with drift. It doesn't use regular differencing, but it does use one seasonal difference over 12 months. This makes sense because the sales data have a strong yearly seasonal pattern. The model also includes a drift term to account for the general upward trend.
+
+For ETS, the selected model was ETS(A,A,A). This means it has additive errors, an additive trend, and additive seasonality. Since the model uses log sales, the seasonal changes are modeled on the log scale.
+
+### 2.2b - Checking ARIMA Residuals
+
+```{r}
+liquor_fit |>
+  select(arima) |>
+  gg_tsresiduals()
+```
+
+```{r}
+liquor_fit |>
+  select(arima) |>
+  augment() |>
+  features(.innov, ljung_box, lag = 24, dof = 6)
+```
+
+The residuals are mostly centered around zero, but the ACF plot shows some significant spikes, so there is still some autocorrelation left in the data. The Ljung-Box test gives a statistic of about 120 and a p-value close to zero. This means we reject the null hypothesis, and the residuals do not appear to be white noise. However, this does not necessarily mean the model will forecast poorly. We still need to compare its forecasting accuracy against the other models.
+
+### 2.3 - Forecasting Horse Race
+
+#### 2.3a - Forecast Origins
+
+The cross-validation uses 216 forecast origins. The first forecast is for January 2002, and the last one is for December 2019. The training sample starts with 120 months and increases by one month each time.
+
+#### 2.3b - Forecast Accuracy
+
+```{r}
+liquor_accuracy <- readRDS("results/liquor_accuracy.rds")
+
+liquor_accuracy |>
+  select(.model, RMSE, MAE) |>
+  knitr::kable(digits = 1)
+```
+
+ARIMA has the lowest RMSE (81.4) and MAE (65.7), so it performs the best out of the three models. ETS comes second, while the seasonal naive model has the largest errors. Both RMSE and MAE give the same ranking, which makes ARIMA the best choice based on these results.
+
+### 2.4 - Diebold-Mariano Tests
+
+```{r}
+dm_arima_ets <- readRDS("results/dm_arima_ets.rds")
+dm_arima_snaive <- readRDS("results/dm_arima_snaive.rds")
+
+dm_arima_ets
+dm_arima_snaive
+```
+
+Both DM tests show statistically significant differences in forecasting accuracy. The ARIMA vs. ETS test has a statistic of -2.9062 and a p-value of 0.004042, while the ARIMA vs. seasonal naive test has a statistic of -10.755 and a p-value below 2.2e-16. Since ARIMA also has the lowest RMSE and MAE, I would choose it for the liquor store chain because it gave the most accurate forecasts in this comparison.
+
+## Forecast Combination
+
+### 3a - Equal-Weight Forecast Combination
+
+```{r}
+combo_accuracy <- readRDS("results/combo_accuracy.rds")
+
+combo_accuracy |>
+  select(.model, RMSE, MAE) |>
+  knitr::kable(digits = 1)
+```
+
+The combined model has an RMSE of 85.2 and an MAE of 66.8. This is better than ETS, but ARIMA still performs the best with an RMSE of 81.4 and an MAE of 65.7. So, averaging the two forecasts helped compared to using ETS alone, but it did not improve on ARIMA.
+
+### 3b - Correlation Between Forecast Errors
+
+```{r}
+error_correlation <- readRDS("results/error_correlation.rds")
+
+error_correlation
+```
+
+The correlation between the ARIMA and ETS forecast errors is about 0.878, which is pretty high. This means the two models tend to make similar mistakes, so combining them doesn't help as much. Also, the DM test showed that ARIMA performs significantly better than ETS. Because of this, averaging the two models did not improve the forecasts compared to just using ARIMA.
+
+## VAR vs. BVAR
+
+### 4.1 - The Data
+
+For this part, I used eight quarterly economic variables from FRED-QD, covering 1960 Q1 through 2019 Q4.
+
+The cross-validation starts with 120 quarters of training data and produces 120 forecasts for each variable. The first forecast is for 1990 Q1, and the last is for 2019 Q4.
+
+### 4.2 - Comparing VAR(1) and VAR(4)
+
+\`\`\`{r} id="var-results" var_ols_results \<- readRDS("results/var_ols_results.rds")
+
+var_ols_results \|\> knitr::kable(digits = 3) \`\`\`
+
+VAR(1) performs better than VAR(4) for 7 out of the 8 variables. The only exception is inflation, where VAR(4) has a slightly lower RMSE.
+
+Even though VAR(4) includes more lags, this does not necessarily make its forecasts better. It has more coefficients to estimate, which can lead to overfitting. VAR(1) is simpler and seems to work better for most of the variables in this case.
+
+### 4.3 - Bayesian VAR
+
+#### 4.3a and 4.3b - Comparing the Models
+
+```{r}
+var_results <- readRDS("results/var_results.rds")
+
+var_results |>
+  knitr::kable(digits = 3)
+```
+
+The BVAR(4) with lambda = 0.3 performs better than the regular VAR(4) for all eight variables. Both models use four lags, but the BVAR uses shrinkage to keep the coefficient estimates from becoming too large. This seems to help reduce overfitting.
+
+Compared to VAR(1), the BVAR with lambda = 0.3 performs better for only three variables: investment, inflation, and the 10-year Treasury yield. This shows that the simpler VAR(1) is still hard to beat.
+
+When lambda decreases to 0.05, the forecasts get worse for most variables. The main exception is the federal funds rate, where stronger shrinkage actually helps. Overall, this suggests that some shrinkage can improve accuracy, but too much can hurt forecasting performance.
+
+I also wouldn't assume that the lowest RMSE in this table is an unbiased estimate of future forecasting accuracy. Since we are choosing the best model based on these same results, we could be selecting a model that happened to perform especially well in this sample. A separate test period would give us a better estimate of how it performs on new data.
+
+#### 4.3c - Diebold-Mariano Tests
+
+```{r}
+dm_gdp <- readRDS("results/dm_gdp.rds")
+dm_infl <- readRDS("results/dm_infl.rds")
+
+dm_gdp
+dm_infl
+```
+
+For GDP growth, the DM statistic is 2.1366 with a p-value of 0.03468. Since the p-value is below 0.05, the difference is statistically significant, and the BVAR performs better than VAR(4).
+
+For inflation, the DM statistic is 1.4529 with a p-value of 0.1489. This is above 0.05, so the difference is not statistically significant. Even though the BVAR has a slightly lower RMSE, there isn't enough evidence to say it forecasts inflation better.
+
+These results show that a lower RMSE doesn't always mean a model is significantly more accurate. This makes me more careful about choosing a model just because it has the smallest RMSE in the comparison table.
+
+## Factor Model
+
+### 5.1 - The Data
+
+#### 5.1a and 5.1b - Preparing the Data
+
+```{r}
+md_raw <- read_csv(
+  "data/fredmd_2026-09.csv",
+  show_col_types = FALSE
+)
+
+tcode <- unlist(md_raw[1, -1])
+
+md <- md_raw[-1, ] |>
+  mutate(date = as.Date(sasdate, "%m/%d/%Y"))
+
+transform_series <- function(x, code) {
+  d <- function(v) c(NA, diff(v))
+
+  switch(
+    as.character(code),
+    "1" = x,
+    "2" = d(x),
+    "3" = d(d(x)),
+    "4" = log(x),
+    "5" = 100 * d(log(x)),
+    "6" = 100 * d(d(log(x))),
+    "7" = d(x / dplyr::lag(x) - 1)
+  )
+}
+
+fm <- map2_dfc(
+  md[names(tcode)],
+  tcode,
+  transform_series
+) |>
+  mutate(date = md$date, .before = 1) |>
+  filter(
+    date >= as.Date("1960-03-01"),
+    date <= as.Date("2019-12-01")
+  )
+
+fm <- fm[, colSums(is.na(fm)) == 0]
+
+dim(fm)
+```
+
+I applied the transformation codes to the FRED-MD dataset and kept observations from March 1960 through December 2019. After removing series with missing values, the final dataset has 718 observations and 122 columns, including the date column. This leaves 121 economic series for the factor analysis.
+
+#### 5.1c - Transformation Codes
+
+```{r}
+tcode[c("INDPRO", "PAYEMS", "CPIAUCSL", "FEDFUNDS")]
+```
+
+INDPRO and PAYEMS both have transformation code 5, meaning they are converted into monthly percentage growth rates using log differences.
+
+CPIAUCSL has code 6, which takes the second difference of the log. This measures changes in the monthly inflation rate.
+
+FEDFUNDS has code 2, meaning we take the difference between consecutive monthly interest rates.
+
+The transformations are different because industrial production is better measured using percentage growth, while interest rates are usually measured using changes in percentage points. For example, if an interest rate increases from 3% to 4%, we would normally describe this as a one percentage point increase.
+
+### 5.2 - Estimating the Factors
+
+#### 5.2a - Principal Component Analysis
+
+```{r}
+Z <- fm |>
+  select(-date) |>
+  as.matrix()
+
+pc <- prcomp(scale(Z))
+
+summary(pc)$importance[, 1:5]
+
+sum(summary(pc)$importance[2, 1:3])
+```
+
+The first three principal components explain about 29.45% of the total variation in the 121 economic series. The first component explains about 14.98%, while the second and third explain around 7.41% and 7.06%. This shows that a small number of factors can summarize a substantial amount of information from the dataset.
+
+#### 5.2b - First Principal Component
+
+```{r}
+F1 <- pc$x[, 1] * sign(cor(pc$x[, 1], fm$INDPRO))
+
+tibble(date = fm$date, F1 = F1) |>
+  ggplot(aes(x = date, y = F1)) +
+  geom_line() +
+  labs(
+    title = "First Factor from FRED-MD",
+    x = "Year",
+    y = "First Principal Component"
+  ) +
+  theme_minimal()
+```
+
+The first factor moves around zero and has some large negative drops, especially during the mid-1970s, early 1980s, and 2008–2009. These periods line up with major economic slowdowns. Since the factor is positively correlated with industrial production, it seems to capture changes in overall economic activity. Higher values generally suggest stronger activity, while lower values suggest weaker activity.
+
+#### 5.2c - Interpreting the Factors
+
+```{r}
+factor1_corr <- readRDS("results/factor1_corr.rds")
+factor2_corr <- readRDS("results/factor2_corr.rds")
+
+factor1_corr
+factor2_corr
+```
+
+The first factor seems to capture overall economic activity. The variables most correlated with it include employment, industrial production, and manufacturing activity. This also matches the graph from the previous question, where the factor drops sharply during major economic slowdowns.
+
+The second factor appears to capture inflation and price movements. Most of its strongest correlations are with CPI and PCE price indexes, including commodity prices, transportation prices, and overall consumer prices. This suggests that the factor summarizes common changes in prices across the economy.
+
+### 5.3 - Forecasting Industrial Production
+
+```{r}
+ip_results <- readRDS("results/ip_results.rds")
+
+knitr::kable(
+  data.frame(
+    Model = c("AR(1)", "AR(1) + 3 Factors"),
+    RMSE = as.numeric(ip_results)
+  ),
+  digits = 3
+)
+```
+
+The AR(1) model has an RMSE of 0.617, while the model with three factors has an RMSE of 0.589. These results match the values from class. Adding the factors improves forecasting accuracy by about 4.6%, suggesting that information from other economic variables helps predict industrial production growth.
+
+It would be cheating to estimate the factors using the full dataset because that would include future information in earlier forecasts. By re-estimating the factors at each forecast origin, we only use information that would have been available at that time.
+
+### 5.4 - Forecasting 12-Month CPI Inflation
+
+```{r}
+inflation_results <- readRDS("results/inflation_results.rds")
+
+inflation_results |>
+  knitr::kable(digits = 3)
+
+# Percentage improvement in RMSE
+100 * (inflation_results$RMSE_AR -
+       inflation_results$RMSE_FA) /
+       inflation_results$RMSE_AR
+```
+
+The model with three factors performs better than the model using only past inflation. The RMSE decreases from 2.11 to 1.89, which is an improvement of about 10.16%. The MAE also decreases from 1.58 to 1.35.
+
+The DM test gives a p-value of 0.000443, which is below 0.05. This means the difference in forecasting accuracy is statistically significant. Overall, adding information from the economic factors seems to help predict inflation over the next 12 months.
+
+## Reflection
+
+One thing I noticed throughout this assignment is that more complicated forecasting models don't always give better results. For example, VAR(1) performed better than VAR(4) for most of the variables, even though VAR(4) uses more information. The forecast combination also didn't beat ARIMA alone, showing that averaging models is not always helpful. However, adding economic factors improved the forecasts for both industrial production and inflation. This shows that using more information can be useful, but it doesn't always lead to better forecasts.
