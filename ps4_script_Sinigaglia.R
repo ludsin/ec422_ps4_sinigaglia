@@ -1,12 +1,8 @@
+# EC 422 - Problem Set 4
+# Load packages
 library(tidyverse)
 library(fpp3)
 library(BVAR)
-
-
-install.packages("BVAR", repos = "https://cloud.r-project.org")
-
-library(BVAR)
-
 
 # Part 2 - ARIMA vs. ETS
 
@@ -594,6 +590,11 @@ factor2_corr <- sort(
 # Display results
 factor1_corr
 factor2_corr
+
+# Save factor correlations for Quarto
+
+saveRDS(factor1_corr, "results/factor1_corr.rds")
+saveRDS(factor2_corr, "results/factor2_corr.rds")
 
 
 

@@ -172,9 +172,12 @@ The cross-validation starts with 120 quarters of training data and produces 120 
 
 ### 4.2 - Comparing VAR(1) and VAR(4)
 
-\`\`\`{r} id="var-results" var_ols_results \<- readRDS("results/var_ols_results.rds")
+```{{r}}
+var_ols_results <- readRDS("results/var_ols_results.rds")
 
-var_ols_results \|\> knitr::kable(digits = 3) \`\`\`
+var_ols_results |>
+  knitr::kable(digits = 3)
+```
 
 VAR(1) performs better than VAR(4) for 7 out of the 8 variables. The only exception is inflation, where VAR(4) has a slightly lower RMSE.
 
